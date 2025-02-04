@@ -1,0 +1,11 @@
+# FreeSWITCH配置
+freeswitch:
+  host: "192.168.11.161"
+  port: 8021
+  password: "ClueCon"
+
+# 科大讯飞ASR配置
+asr:
+  appid: "c0de4f24"
+  apikey: "51012a35448538a8396dc564cf050f68"
+  apisecret: "NWRhZDBkNzA5ZDQxNGMzYmQ1NWMwMWNh"
