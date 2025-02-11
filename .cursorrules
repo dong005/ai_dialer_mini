@@ -28,5 +28,7 @@ https://www.xfyun.cn/doc/asr/voicedictation/API.html
 我下载了一个demo在/iat_ws_go_demo
 
 
-fs的服务器地址是192.168.11.161 外网ip地址111.61.208.207 8021 ClueCon
+fs的服务器地址是192.168.11.180 外网ip地址111.61.208.207 8021 ClueCon
 mysql的地址信息是root@127.0.0.1 ai_dialer
+
+如果要运行go run main.go我手动运行就可以了别乱改我的端口两边都要调很麻烦

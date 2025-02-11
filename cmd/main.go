@@ -4,11 +4,11 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"go/types"
 	"log"
 	"os"
 	"strings"
 
-	"ai_dialer_mini/internal/config"
 	"ai_dialer_mini/internal/service/asr"
 	"ai_dialer_mini/internal/service/fs"
 )
@@ -18,18 +18,33 @@ func main() {
 	log.Println("AI 电话系统启动中...")
 
 	// 加载配置
-	cfg, err := config.Load("config.yaml")
-	if err != nil {
+	var config types.Config
+	if err := loadConfig(&config); err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
+	// 初始化服务
+	fsClient := fs.New(&config.Freeswitch)
+	asrService := asr.New(&config.ASR)
+
 	// 连接FreeSWITCH
-	fsClient := fs.NewClient(cfg.FreeSWITCH)
-	err = fsClient.Connect()
+	err := fsClient.Connect()
 	if err != nil {
 		log.Fatalf("连接FreeSWITCH失败: %v", err)
 	}
 	defer fsClient.Close()
+
+	// 创建ASR服务
+	defer asrService.Stop()
+
+	// 启动HTTP服务器
+	httpServer := fs.NewHTTPServer(":8080", asrService)
+	go func() {
+		if err := httpServer.Start(); err != nil {
+			log.Fatalf("HTTP服务器启动失败: %v", err)
+		}
+	}()
+	defer httpServer.Stop()
 
 	// 订阅事件
 	if err := fsClient.Subscribe([]string{
@@ -42,13 +57,9 @@ func main() {
 		log.Fatalf("订阅事件失败: %v", err)
 	}
 
-	// 创建ASR服务
-	asrService := asr.NewXFYunASR(cfg.ASR)
-	defer asrService.Close()
-
 	// 启动事件处理
 	ctx, cancel := context.WithCancel(context.Background())
-	go handleEvents(ctx, fsClient, asrService)
+	go handleEvents(ctx, fsClient)
 	defer cancel()
 
 	// 启动命令处理
@@ -58,92 +69,95 @@ func main() {
 // handleCommands 处理用户输入的命令
 func handleCommands(client *fs.Client) {
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Println("可用命令:")
-	fmt.Println("  call <from> <to> - 发起呼叫")
-	fmt.Println("  quit/exit - 退出程序")
 
-	for {
-		fmt.Print("> ")
-		command, err := reader.ReadString('\n')
-		if err != nil {
-			log.Printf("读取命令失败: %v", err)
-			continue
+	// 显示帮助信息
+	showHelp()
+
+	// 创建一个通道用于接收命令
+	cmdChan := make(chan string)
+
+	// 启动一个goroutine来读取用户输入
+	go func() {
+		for {
+			command, err := reader.ReadString('\n')
+			if err != nil {
+				if err.Error() != "EOF" {
+					log.Printf("[WARN] 读取命令时发生错误: %v", err)
+				}
+				close(cmdChan)
+				return
+			}
+			cmdChan <- strings.TrimSpace(command)
 		}
+	}()
 
-		command = strings.TrimSpace(command)
+	// 主循环处理命令
+	for command := range cmdChan {
 		if command == "" {
 			continue
 		}
 
 		parts := strings.Fields(command)
+		if len(parts) == 0 {
+			continue
+		}
+
 		switch parts[0] {
 		case "call":
 			if len(parts) != 3 {
-				log.Printf("用法: call <from> <to>")
+				log.Printf("[ERROR] 用法错误: call <from> <to>")
+				showHelp()
 				continue
 			}
 			from, to := parts[1], parts[2]
 			if err := client.HandleCall(from, to); err != nil {
-				log.Printf("发起呼叫失败: %v", err)
+				log.Printf("[ERROR] 发起呼叫失败: %v", err)
 			}
 		case "quit", "exit":
+			log.Println("[INFO] 正在退出程序...")
 			return
 		case "help":
-			fmt.Println("可用命令:")
-			fmt.Println("  call <from> <to> - 发起呼叫")
-			fmt.Println("  quit/exit - 退出程序")
+			showHelp()
 		default:
-			log.Printf("未知命令: %s", command)
+			log.Printf("[WARN] 未知命令: %s", parts[0])
+			showHelp()
 		}
 	}
 }
 
+// showHelp 显示帮助信息
+func showHelp() {
+	fmt.Println("\n可用命令:")
+	fmt.Println("  help            - 显示此帮助信息")
+	fmt.Println("  quit/exit       - 退出程序")
+	fmt.Print("> ")
+}
+
 // handleEvents 处理FreeSWITCH事件
-func handleEvents(ctx context.Context, fsClient *fs.Client, asrClient *asr.XFYunASR) {
+func handleEvents(ctx context.Context, fsClient *fs.Client) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case event := <-fsClient.GetEvents():
-			log.Printf("收到事件: %s", event.EventName)
+			log.Printf("[DEBUG] 处理事件: %s", event.EventName)
 
 			switch event.EventName {
 			case "CHANNEL_CREATE":
-				log.Printf("通道创建: 主叫=%s, 被叫=%s", event.CallerNumber, event.CalledNumber)
+				log.Printf("[INFO] 通道创建: 主叫=%s, 被叫=%s, UUID=%s",
+					event.CallerNumber, event.CalledNumber, event.CallID)
 
 			case "CHANNEL_ANSWER":
-				log.Printf("通话应答: 主叫=%s, 被叫=%s", event.CallerNumber, event.CalledNumber)
-
-				// 启动ASR会话
-				if err := asrClient.Start(event.CallID); err != nil {
-					log.Printf("启动ASR会话失败: %v", err)
-				} else {
-					log.Printf("ASR会话启动成功: callID=%s", event.CallID)
-				}
+				log.Printf("[INFO] 通话应答: 主叫=%s, 被叫=%s, UUID=%s",
+					event.CallerNumber, event.CalledNumber, event.CallID)
 
 			case "CHANNEL_HANGUP":
-				log.Printf("通话挂断: 主叫=%s, 被叫=%s", event.CallerNumber, event.CalledNumber)
-				asrClient.Stop(event.CallID)
+				log.Printf("[INFO] 通话挂断: 主叫=%s, 被叫=%s, UUID=%s",
+					event.CallerNumber, event.CalledNumber, event.CallID)
 
 			case "CHANNEL_DESTROY":
-				log.Printf("通道销毁: 主叫=%s, 被叫=%s", event.CallerNumber, event.CalledNumber)
+				log.Printf("[INFO] 通道销毁: 主叫=%s, 被叫=%s, UUID=%s", event.CallerNumber, event.CalledNumber, event.CallID)
 
-			case "CUSTOM":
-				// 处理媒体事件
-				if event.Headers["Event-Subclass"] == "sofia::media" {
-					// 获取音频数据
-					if audioData := event.Headers["Media-Data"]; audioData != "" {
-						// 发送到ASR服务
-						if err := asrClient.WriteAudio(event.CallID, []byte(audioData)); err != nil {
-							log.Printf("发送音频数据失败: %v", err)
-						}
-					}
-				}
-			}
-		case result := <-asrClient.GetResults():
-			// 处理ASR结果
-			if result != nil {
-				log.Printf("【ASR识别结果】通话ID: %s, 文本: %s", result.CallID, result.Text)
 			}
 		}
 	}

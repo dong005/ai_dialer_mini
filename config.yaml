@@ -1,6 +1,6 @@
 # FreeSWITCH配置
 freeswitch:
-  host: "192.168.11.161"
+  host: "192.168.11.180"
   port: 8021
   password: "ClueCon"
 
@@ -9,3 +9,18 @@ asr:
   appid: "c0de4f24"
   apikey: "51012a35448538a8396dc564cf050f68"
   apisecret: "NWRhZDBkNzA5ZDQxNGMzYmQ1NWMwMWNh"
+
+# MySQL配置
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "root"
+  password: ""
+  database: "ai_dialer"
+
+# Redis配置
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  db: 0

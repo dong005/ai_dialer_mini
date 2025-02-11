@@ -1,181 +1,288 @@
 package fs
 
 import (
-	"ai_dialer_mini/internal/config"
-	"ai_dialer_mini/internal/service/asr"
+	"bufio"
 	"fmt"
+	"io"
 	"log"
+	"net"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"ai_dialer_mini/internal/types"
 	"github.com/fiorix/go-eventsocket/eventsocket"
 )
 
-// Client FreeSWITCH ESL客户端
+// Client FreeSWITCH客户端
 type Client struct {
-	config *config.FreeSwitchConfig
-	conn   *eventsocket.Connection
-	events chan *CallEvent
+	conn      *eventsocket.Connection
+	events    chan *types.Event
+	audioChan chan *types.AudioData
+	config    *types.FSConfig
+	done      chan struct{}
+	started   bool
+	sync.RWMutex
 }
 
 // NewClient 创建新的FreeSWITCH客户端
-func NewClient(config *config.FreeSwitchConfig) *Client {
+func NewClient(config *types.FSConfig) *Client {
 	return &Client{
-		config: config,
-		events: make(chan *CallEvent, 100),
+		events:    make(chan *types.Event, 100),
+		audioChan: make(chan *types.AudioData, 1000),
+		config:    config,
+		done:      make(chan struct{}),
+		started:   false,
 	}
 }
 
 // Connect 连接到FreeSWITCH
 func (c *Client) Connect() error {
-	var err error
-	c.conn, err = eventsocket.Dial(fmt.Sprintf("%s:%d", c.config.Host, c.config.Port), c.config.Password)
-	if err != nil {
-		return fmt.Errorf("连接FreeSWITCH失败: %v", err)
+	c.Lock()
+	defer c.Unlock()
+
+	if c.started {
+		return nil
 	}
 
-	// 只订阅需要的事件
-	events := []string{
-		"CHANNEL_CREATE",
-		"CHANNEL_ANSWER",
-		"CHANNEL_HANGUP",
-		"CHANNEL_DESTROY",
-	}
-	if _, err := c.conn.Send(fmt.Sprintf("events plain %s", strings.Join(events, " "))); err != nil {
-		return fmt.Errorf("订阅事件失败: %v", err)
+	// 连接FreeSWITCH
+	if err := c.connect(); err != nil {
+		return err
 	}
 
 	// 启动事件处理
 	go c.handleEvents()
 
-	log.Printf("已连接到FreeSWITCH服务器 %s:%d", c.config.Host, c.config.Port)
+	c.started = true
 	return nil
 }
 
-// Subscribe 订阅事件
-func (c *Client) Subscribe(events []string) error {
-	eventList := strings.Join(events, " ")
-	_, err := c.conn.Send(fmt.Sprintf("events plain %s", eventList))
-	if err != nil {
-		return fmt.Errorf("订阅事件失败: %v", err)
+// Start 启动客户端
+func (c *Client) Start() error {
+	c.Lock()
+	defer c.Unlock()
+
+	if c.started {
+		return nil
 	}
+
+	// 连接FreeSWITCH
+	if err := c.connect(); err != nil {
+		return err
+	}
+
+	// 启动事件处理
+	go c.handleEvents()
+
+	c.started = true
 	return nil
 }
 
-// handleEvents 处理FreeSWITCH事件
+// handleEvents 处理事件循环
 func (c *Client) handleEvents() {
+	reader := bufio.NewReader(c.conn)
+	defer close(c.events)
+
 	for {
-		ev, err := c.ReadEvent()
-		if err != nil {
-			log.Printf("读取事件错误: %v", err)
-			c.reconnect()
-			continue
-		}
-
-		// 跳过非事件消息
-		if ev == nil {
-			continue
-		}
-
-		eventName := ev.GetHeader("Event-Name")
-		if eventName == "" {
-			continue
-		}
-
-		// 只处理关心的事件类型
-		switch eventName {
-		case "CHANNEL_CREATE", "CHANNEL_ANSWER", "CHANNEL_HANGUP", "CHANNEL_DESTROY", "CUSTOM":
-			log.Printf("收到FreeSWITCH事件: %s", eventName)
-			// 打印所有事件头部
-			log.Printf("事件头部信息:")
-			for k := range ev.headers {
-				v := ev.GetHeader(k)
-				if v != "" {
-					log.Printf("  %s = %s", k, v)
+		select {
+		case <-c.done:
+			return
+		default:
+			event, err := c.readEvent(reader)
+			if err != nil {
+				if err == io.EOF {
+					return
 				}
-			}
-
-			// 获取CallID
-			var callID string
-			possibleFields := []string{
-				"Unique-ID",
-				"Channel-Call-UUID",
-				"variable_call_uuid",
-				"Other-Leg-Unique-ID",
-				"Bridge-A-Unique-ID",
-				"Bridge-B-Unique-ID",
-			}
-
-			for _, field := range possibleFields {
-				if id := ev.GetHeader(field); id != "" {
-					callID = id
-					log.Printf("使用 %s 作为CallID: %s", field, id)
-					break
-				}
-			}
-
-			// 获取主叫和被叫号码
-			callerNumber := ev.GetHeader("Caller-ANI")
-			if callerNumber == "" {
-				callerNumber = ev.GetHeader("Caller-Caller-ID-Number")
-			}
-			if callerNumber == "" {
-				callerNumber = ev.GetHeader("variable_origination_caller_id_number")
-			}
-
-			calledNumber := ev.GetHeader("Caller-Destination-Number")
-			if calledNumber == "" {
-				calledNumber = ev.GetHeader("variable_dialed_number")
-			}
-
-			// 创建通话事件
-			event := &CallEvent{
-				EventName:    eventName,
-				CallID:       callID,
-				CallerNumber: callerNumber,
-				CalledNumber: calledNumber,
-				Headers:      make(map[string]string),
-			}
-
-			// 复制事件头部信息
-			for k := range ev.headers {
-				event.Headers[k] = ev.GetHeader(k)
+				log.Printf("[ERROR] 读取事件失败: %v", err)
+				continue
 			}
 
 			// 发送事件到通道
 			select {
 			case c.events <- event:
-				log.Printf("已发送事件到通道: %s", eventName)
+				log.Printf("[DEBUG] 事件已发送到通道: %s", event.EventName)
 			default:
-				log.Printf("事件通道已满，丢弃事件: %s", eventName)
+				log.Printf("[WARN] 事件通道已满，丢弃事件: %s", event.EventName)
 			}
 		}
 	}
 }
 
-// reconnect 重新连接
-func (c *Client) reconnect() {
+// readEvent 读取单个事件
+func (c *Client) readEvent(reader *bufio.Reader) (*types.Event, error) {
+	var headers []string
+
+	// 读取事件头
 	for {
-		log.Println("尝试重新连接FreeSWITCH...")
-		err := c.Connect()
-		if err == nil {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
 			break
 		}
-		log.Printf("重连失败: %v", err)
-		time.Sleep(5 * time.Second)
+		headers = append(headers, line)
 	}
+
+	// 解析Content-Length
+	contentLength := 0
+	for _, header := range headers {
+		if strings.HasPrefix(header, "Content-Length: ") {
+			length := strings.TrimPrefix(header, "Content-Length: ")
+			contentLength, _ = strconv.Atoi(length)
+			break
+		}
+	}
+
+	// 读取事件体
+	if contentLength > 0 {
+		bodyBytes := make([]byte, contentLength)
+		_, err := io.ReadFull(reader, bodyBytes)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// 解析事件
+	event := &types.Event{
+		Headers: make(map[string]string),
+	}
+
+	// 解析所有头部字段
+	for _, header := range headers {
+		parts := strings.SplitN(header, ": ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key, value := parts[0], parts[1]
+		event.Headers[key] = value
+
+		// 提取关键字段
+		switch key {
+		case "Event-Name":
+			event.EventName = value
+		case "Unique-ID":
+			event.CallID = value
+		case "Caller-Caller-ID-Number":
+			event.CallerNumber = value
+		case "Caller-Destination-Number":
+			event.CalledNumber = value
+		}
+	}
+
+	return event, nil
 }
 
-// Originate 发起呼叫
-func (c *Client) Originate(from, to string) error {
-	// 设置更多的呼叫参数
-	cmd := fmt.Sprintf("originate {origination_caller_id_number=%s,origination_caller_id_name=%s,originate_timeout=30}user/%s &bridge(user/%s)",
-		from, from, from, to)
-	log.Printf("执行FreeSWITCH命令: %s", cmd)
-	_, err := c.conn.Send("api " + cmd)
-	if err != nil {
-		return fmt.Errorf("发起呼叫失败: %v", err)
+// connect 连接到FreeSWITCH
+func (c *Client) connect() error {
+	var err error
+	maxRetries := 3
+	retryDelay := time.Second
+
+	for i := 0; i < maxRetries; i++ {
+		log.Printf("[INFO] 尝试连接FreeSWITCH服务器 %s:%d", c.config.Host, c.config.Port)
+
+		// 建立TCP连接
+		addr := fmt.Sprintf("%s:%d", c.config.Host, c.config.Port)
+		c.conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+		if err != nil {
+			log.Printf("[ERROR] 连接失败: %v, 重试中...", err)
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		// 读取欢迎信息
+		resp, err := c.readResponse()
+		if err != nil {
+			log.Printf("[ERROR] 读取欢迎信息失败: %v", err)
+			c.conn.Close()
+			time.Sleep(retryDelay)
+			continue
+		}
+		log.Printf("[DEBUG] 收到欢迎信息: %s", resp)
+
+		// 发送认证
+		auth := fmt.Sprintf("auth %s\n\n", c.config.Password)
+		_, err = c.conn.Write([]byte(auth))
+		if err != nil {
+			log.Printf("[ERROR] 发送认证信息失败: %v", err)
+			c.conn.Close()
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		// 读取认证响应
+		resp, err = c.readResponse()
+		if err != nil {
+			log.Printf("[ERROR] 读取认证响应失败: %v", err)
+			c.conn.Close()
+			time.Sleep(retryDelay)
+			continue
+		}
+		log.Printf("[DEBUG] 认证响应: %s", resp)
+
+		if !strings.Contains(resp, "+OK accepted") {
+			log.Printf("[ERROR] 认证失败: %s", resp)
+			c.conn.Close()
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		log.Printf("[INFO] 已成功连接到FreeSWITCH服务器 %s:%d", c.config.Host, c.config.Port)
+		return nil
 	}
+
+	return fmt.Errorf("连接FreeSWITCH服务器失败，已重试%d次", maxRetries)
+}
+
+// send 发送命令
+func (c *Client) send(cmd string) error {
+	_, err := c.conn.Write([]byte(cmd))
+	return err
+}
+
+// readResponse 读取响应
+func (c *Client) readResponse() (string, error) {
+	var response strings.Builder
+	reader := bufio.NewReader(c.conn)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("读取响应失败: %v", err)
+		}
+		response.WriteString(line)
+
+		// 如果是认证响应，需要继续读取直到遇到空行
+		if strings.HasPrefix(line, "Content-Type: auth/request") {
+			continue
+		}
+
+		// 检查错误响应
+		if strings.HasPrefix(line, "-ERR") {
+			return response.String(), fmt.Errorf("收到错误响应: %s", strings.TrimSpace(line))
+		}
+
+		// 空行表示响应结束
+		if line == "\n" {
+			break
+		}
+	}
+
+	return response.String(), nil
+}
+
+// SendCommand 发送FreeSWITCH命令
+func (c *Client) SendCommand(cmd string) error {
+	if err := c.send(cmd + "\n\n"); err != nil {
+		return err
+	}
+	resp, err := c.readResponse()
+	if err != nil {
+		return err
+	}
+	log.Printf("命令响应: %s", resp)
 	return nil
 }
 
@@ -184,67 +291,27 @@ func (c *Client) Close() {
 	if c.conn != nil {
 		c.conn.Close()
 	}
-	close(c.events)
+	close(c.done)
 }
 
 // GetEvents 获取事件通道
-func (c *Client) GetEvents() <-chan *CallEvent {
+func (c *Client) GetEvents() <-chan *types.Event {
 	return c.events
 }
 
-// Event FreeSWITCH事件
-type Event struct {
-	headers map[string]string
+// Subscribe 订阅事件
+func (c *Client) Subscribe(events []string) error {
+	cmd := fmt.Sprintf("events plain %s\n\n", strings.Join(events, " "))
+	return c.send(cmd)
 }
 
-// GetHeader 获取事件头部字段
-func (e *Event) GetHeader(name string) string {
-	if e.headers == nil {
-		return ""
-	}
-	return e.headers[name]
-}
-
-// ReadEvent 读取事件
-func (c *Client) ReadEvent() (*Event, error) {
-	ev, err := c.conn.ReadEvent()
-	if err != nil {
-		return nil, err
-	}
-
-	// 打印原始事件信息
-	log.Printf("收到原始事件: Content-Type=%s, Event-Name=%s",
-		ev.Get("Content-Type"), ev.Get("Event-Name"))
-
-	// 创建新的事件对象
-	event := &Event{
-		headers: make(map[string]string),
-	}
-
-	// 复制事件头部
-	for k := range ev.Header {
-		v := ev.Get(k)
-		if v != "" {
-			event.headers[k] = v
-		}
-	}
-
-	// 检查是否是有效事件
-	if event.GetHeader("Event-Name") == "" {
-		log.Printf("跳过无效事件")
-		return nil, nil
-	}
-
-	return event, nil
-}
-
-// CallEvent 通话事件
-type CallEvent struct {
-	EventName    string
-	CallID       string
-	CallerNumber string
-	CalledNumber string
-	Headers      map[string]string
+// Originate 发起呼叫
+func (c *Client) Originate(from, to string) error {
+	// 设置更多的呼叫参数
+	cmd := fmt.Sprintf("api originate {origination_caller_id_number=%s,origination_caller_id_name=%s,originate_timeout=30}user/%s &bridge(user/%s)",
+		from, from, from, to)
+	log.Printf("执行FreeSWITCH命令: %s", cmd)
+	return c.SendCommand(cmd)
 }
 
 // HandleCall 发起呼叫并处理ASR
@@ -257,35 +324,44 @@ func (c *Client) HandleCall(from, to string) error {
 		return fmt.Errorf("发起呼叫失败: %v", err)
 	}
 
-	// 订阅更多事件类型以便调试
-	log.Println("订阅所有相关事件...")
-	_, err = c.conn.Send("event plain CHANNEL_CREATE CHANNEL_ANSWER CHANNEL_HANGUP CHANNEL_DESTROY CUSTOM sofia::media")
-	if err != nil {
+	// 订阅通道事件
+	if err := c.Subscribe([]string{
+		"CHANNEL_CREATE",
+		"CHANNEL_ANSWER",
+		"CHANNEL_HANGUP",
+		"CHANNEL_DESTROY",
+		"CUSTOM",
+		"sofia::register",
+		"sofia::unregister",
+		"sofia::media",
+	}); err != nil {
 		return fmt.Errorf("订阅事件失败: %v", err)
 	}
 
+	// 启动事件监听
 	go func() {
-		for {
-			ev, err := c.ReadEvent()
-			if err != nil {
-				log.Printf("读取事件错误: %v", err)
-				return
-			}
-
-			if ev == nil {
-				log.Println("收到空事件，跳过")
-				continue
-			}
-
-			eventName := ev.GetHeader("Event-Name")
-			log.Printf("收到事件: %s", eventName)
-
-			if eventName == "CHANNEL_ANSWER" {
-				uuid := ev.GetHeader("Unique-ID")
-				log.Printf("通话已接通，UUID: %s", uuid)
+		for event := range c.events {
+			if event.EventName == "CHANNEL_ANSWER" {
+				// 获取通道UUID
+				uuid := event.CallID
 				if uuid != "" {
-					log.Printf("准备启动ASR，UUID: %s", uuid)
-					go c.StartASR(uuid)
+					log.Printf("通话已接通，开始处理音频流 UUID: %s", uuid)
+
+					// 启动音频流
+					cmd := fmt.Sprintf("api uuid_audio_stream %s start ws://192.168.11.2:8080/ws?uuid=%s mono 8000", uuid, uuid)
+					if err := c.SendCommand(cmd); err != nil {
+						log.Printf("启动音频流失败: %v", err)
+						continue
+					}
+
+					// 获取命令结果
+					setCmd := fmt.Sprintf("set api_result=${uuid_audio_stream(%s start ws://192.168.11.2:8080/ws?uuid=%s mono 8000)}", uuid, uuid)
+					if err := c.SendCommand(setCmd); err != nil {
+						log.Printf("设置音频流参数失败: %v", err)
+						continue
+					}
+
+					log.Printf("音频流已启动 UUID: %s", uuid)
 				}
 			}
 		}
@@ -296,39 +372,12 @@ func (c *Client) HandleCall(from, to string) error {
 
 // StartASR 启动ASR
 func (c *Client) StartASR(uuid string) {
-	log.Printf("开始启动ASR，UUID: %s", uuid)
+	log.Printf("开始ASR处理: uuid=%s", uuid)
 
-	// 订阅通道音频事件
-	log.Println("订阅通道音频事件...")
-	_, err := c.conn.Execute("uuid_record", fmt.Sprintf("%s start", uuid), true)
-	if err != nil {
-		log.Printf("订阅音频事件失败: %v", err)
+	// 发送命令开始录音
+	cmd := fmt.Sprintf("uuid_record %s start /tmp/%s.wav", uuid, uuid)
+	if err := c.SendCommand(cmd); err != nil {
+		log.Printf("开始录音失败: %v", err)
 		return
 	}
-
-	// 创建ASR客户端
-	log.Println("创建ASR客户端...")
-	asrClient := asr.NewXFYunASR(&config.ASRConfig{
-		APPID:     "c0de4f24",
-		APISecret: "NWRhZDBkNzA5ZDQxNGMzYmQ1NWMwMWNh",
-		APIKey:    "51012a35448538a8396dc564cf050f68",
-	})
-
-	// 启动ASR会话
-	log.Println("启动ASR会话...")
-	err = asrClient.Start(uuid)
-	if err != nil {
-		log.Printf("启动ASR会话失败: %v", err)
-		return
-	}
-
-	log.Printf("ASR会话启动成功，开始监听识别结果...")
-	// 监听识别结果
-	go func() {
-		for result := range asrClient.GetResults() {
-			if result.CallID == uuid {
-				log.Printf("【ASR识别结果】UUID: %s, 文本: %s", uuid, result.Text)
-			}
-		}
-	}()
 }

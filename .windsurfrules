@@ -1,4 +1,7 @@
 1、始终用中文，并且函数添中文注释
+
+总的types.go在/internal/types文件夹里，它调用了各个文件夹的types统一调用，各个文件夹定义types都写到同目录的types.go里
+尽量使用types.go里已有的类型
 2、始终给我更好的建议
 3、始终给我推荐更有性价比的插件
 4、我们要短期内快速完成这个项目
@@ -12,21 +15,118 @@
 
 
 
-最终目的：我登录一个工号模拟客户，一个工号模拟客服，客服给我打电话，把我说的话实时转化成文字打印到控制台或者日志显示出来
+[客户语音]  
+   │  
+   ▼  
+FreeSWITCH  
+   │  
+   ▼  
+mod_audio_stream ───音频流（实时PCM/WAV）───► Gin HTTP服务  
+   │                                      │  
+   │                                      ▼  
+   │                                科大讯飞ASR API (转文本)  
+   │                                      │  
+   │                                      ▼  
+   │                                Ollama大模型 (生成回复文本)  
+   │                                      │  
+   │                                      ▼  
+   ◄────TTS文本──微软Edge TTS (生成音频流)───────┤  
+   │  
+   ▼  
+播放回复语音给客户  
+   │  
+   ▼  
+新一轮交互循环  
 
+audio_stream配置
+<!-- 
+  FreeSWITCH mod_audio_stream 配置文件
+  路径: /usr/local/freeswitch/conf/autoload_configs/audio_stream.conf.xml 
+-->
 
+<configuration name="audio_stream.conf" description="Audio Stream Configuration">
 
-科大讯飞api：
-APPID：c0de4f24
-APISecret：NWRhZDBkNzA5ZDQxNGMzYmQ1NWMwMWNh
-APIKey：51012a35448538a8396dc564cf050f68
+  <!-- 
+    **************************************
+    ⚙️ 全局配置 (作用于所有音频流)
+    ************************************** 
+  -->
+  <settings>
+    <!-- 基础缓冲配置 -->
+    <param name="buffer-size" value="64000"/>        <!-- 音频缓冲区大小 (字节) -->
+    <param name="prebuffer-size" value="64000"/>    <!-- 预缓冲大小 (字节) -->
+    <param name="audio-timeout" value="3600000"/>   <!-- 音频超时时间: 1小时 (毫秒) -->
 
-语音听写（流式版）WebAPI 文档
-#接口说明
-https://www.xfyun.cn/doc/asr/voicedictation/API.html
+    <!-- WebSocket配置 -->
+    <param name="ws-connection-timeout" value="5000"/> <!-- WebSocket连接超时 (毫秒) -->
+    <param name="ws-keepalive" value="30"/>          <!-- WebSocket心跳间隔 (秒) -->
+    <param name="ws-retry-count" value="10"/>        <!-- 连接失败重试次数 -->
+    <param name="ws-retry-interval" value="2000"/>   <!-- 重试间隔 (毫秒) -->
 
-我下载了一个demo在/iat_ws_go_demo
+    <!-- 音频处理配置 -->
+    <param name="default-sampling" value="8000"/>     <!-- 默认采样率 (8000 | 16000) -->
+    <param name="default-channels" value="mono"/>    <!-- 默认通道 (mono | mixed | stereo) -->
+    <param name="frame-size" value="320"/>           <!-- 音频帧大小 (字节) -->
 
+    <!-- 日志配置 -->
+    <param name="log-level" value="debug"/>           <!-- 日志级别 (debug | info | warn | error) -->
+    <param name="log-details" value="true"/>         <!-- 是否记录详细日志 -->
+  </settings>
 
-fs的服务器地址是192.168.11.161 外网ip地址111.61.208.207 8021 ClueCon
-mysql的地址信息是root@127.0.0.1 ai_dialer
+  <!-- 
+    **************************************
+    📡 音频流配置
+    **************************************
+  -->
+  <streams>
+    <!-- ASR音频流配置示例 -->
+    <stream name="asr_stream">
+      <!-- WebSocket连接配置 -->
+      <param name="ws-url" value="wss://192.168.11.2/ws"/>
+      <param name="reconnect" value="true"/>         <!-- 断线自动重连 -->
+      
+      <!-- 音频参数配置 -->
+      <param name="sampling" value="8000"/>          <!-- 采样率 -->
+      <param name="channels" value="mono"/>          <!-- 通道模式 -->
+      <param name="format" value="L16"/>            <!-- 音频格式 (L16 | PCMU | PCMA) -->
+      
+      <!-- 元数据配置 -->
+      <param name="metadata" value="{}"/>           <!-- 初始元数据 (JSON格式) -->
+    </stream>
+  </streams>
+
+  <!-- 
+    **************************************
+    📝 使用说明
+    **************************************
+    1. 在拨号计划中使用示例:
+       <action application="audio_stream" data="uuid start wss://server.com/ws mono 8000"/>
+
+    2. 支持的命令:
+       - start: 开始音频流
+       - stop: 停止音频流
+       - pause: 暂停音频流
+       - resume: 恢复音频流
+       - send_text: 发送文本消息
+
+    3. 采样率支持:
+       - 8000Hz (默认)
+       - 16000Hz (高质量)
+
+    4. 通道模式:
+       - mono: 单声道
+       - mixed: 混音
+       - stereo: 立体声
+  -->
+</configuration>
+
+拨号计划：
+	<extension name="audio_stream_asr">
+		<condition field="destination_number" expression="^7777$">
+			<action application="answer"/>
+			<action application="set" data="api_result=${uuid_audio_stream(${uuid} start ws://192.168.11.2:8080/ws mono 8000)}"/>
+			<action application="sleep" data="360000"/>  <!-- 1小时 -->
+			<action application="set" data="api_result=${uuid_audio_stream(${uuid} stop)}"/>
+			<action application="hangup"/>
+		</condition>
+	</extension>
