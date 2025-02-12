@@ -1,164 +1,114 @@
+// Package main 程序入口
 package main
 
 import (
-	"bufio"
 	"context"
-	"fmt"
-	"go/types"
 	"log"
+	"net/http"
 	"os"
-	"strings"
+	"os/signal"
+	"syscall"
+	"time"
 
-	"ai_dialer_mini/internal/service/asr"
-	"ai_dialer_mini/internal/service/fs"
+	"ai_dialer_mini/internal/clients/freeswitch"
+	"ai_dialer_mini/internal/config"
+	"ai_dialer_mini/internal/handlers"
+	"ai_dialer_mini/internal/middleware"
+	"ai_dialer_mini/internal/servers/ws"
+
+	"github.com/gin-gonic/gin"
 )
 
 func main() {
+	// 配置日志输出
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-	log.Println("AI 电话系统启动中...")
 
-	// 加载配置
-	var config types.Config
-	if err := loadConfig(&config); err != nil {
-		log.Fatalf("加载配置失败: %v", err)
-	}
-
-	// 初始化服务
-	fsClient := fs.New(&config.Freeswitch)
-	asrService := asr.New(&config.ASR)
-
-	// 连接FreeSWITCH
-	err := fsClient.Connect()
+	// 加载配置文件
+	cfg, err := config.Load("config.yaml")
 	if err != nil {
-		log.Fatalf("连接FreeSWITCH失败: %v", err)
+		log.Fatalf("加载配置文件失败: %v\n", err)
 	}
-	defer fsClient.Close()
 
-	// 创建ASR服务
-	defer asrService.Stop()
+	// 创建FreeSWITCH客户端配置
+	fsConfig := freeswitch.Config{
+		Host:     cfg.FreeSWITCH.Host,
+		Port:     cfg.FreeSWITCH.Port,
+		Password: cfg.FreeSWITCH.Password,
+	}
 
-	// 启动HTTP服务器
-	httpServer := fs.NewHTTPServer(":8080", asrService)
-	go func() {
-		if err := httpServer.Start(); err != nil {
-			log.Fatalf("HTTP服务器启动失败: %v", err)
-		}
-	}()
-	defer httpServer.Stop()
+	// 创建FreeSWITCH客户端
+	client := freeswitch.NewClient(fsConfig)
+
+	// 注册事件处理器
+	client.RegisterHandler("CHANNEL_CREATE", func(headers map[string]string) error {
+		log.Printf("新通道创建: %s\n", headers["Channel-Name"])
+		return nil
+	})
+
+	client.RegisterHandler("CHANNEL_ANSWER", func(headers map[string]string) error {
+		log.Printf("通道应答: %s\n", headers["Channel-Name"])
+		return nil
+	})
+
+	client.RegisterHandler("CHANNEL_HANGUP", func(headers map[string]string) error {
+		log.Printf("通道挂断: %s, 原因: %s\n", headers["Channel-Name"], headers["Hangup-Cause"])
+		return nil
+	})
+
+	// 连接到FreeSWITCH
+	log.Println("正在连接到FreeSWITCH...")
+	if err := client.Connect(); err != nil {
+		log.Fatalf("连接FreeSWITCH失败: %v\n", err)
+	}
+	defer client.Close()
 
 	// 订阅事件
-	if err := fsClient.Subscribe([]string{
-		"CHANNEL_CREATE",
-		"CHANNEL_ANSWER",
-		"CHANNEL_HANGUP",
-		"CHANNEL_DESTROY",
-		"CUSTOM sofia::media",
-	}); err != nil {
-		log.Fatalf("订阅事件失败: %v", err)
+	log.Println("正在订阅FreeSWITCH事件...")
+	if err := client.SubscribeEvents(); err != nil {
+		log.Fatalf("订阅事件失败: %v\n", err)
 	}
 
-	// 启动事件处理
-	ctx, cancel := context.WithCancel(context.Background())
-	go handleEvents(ctx, fsClient)
-	defer cancel()
+	// 创建Gin引擎
+	engine := gin.Default()
 
-	// 启动命令处理
-	handleCommands(fsClient)
-}
+	// 注册中间件
+	middleware.RegisterMiddleware(engine)
 
-// handleCommands 处理用户输入的命令
-func handleCommands(client *fs.Client) {
-	reader := bufio.NewReader(os.Stdin)
+	// 注册路由
+	handlers.RegisterRoutes(engine, client)
 
-	// 显示帮助信息
-	showHelp()
+	// 创建并启动 ASR 服务器
+	asrServer := ws.NewASRServer()
+	engine.GET("/asr", func(c *gin.Context) {
+		asrServer.ServeHTTP(c.Writer, c.Request)
+	})
 
-	// 创建一个通道用于接收命令
-	cmdChan := make(chan string)
+	// 创建HTTP服务器
+	srv := &http.Server{
+		Addr:    cfg.Server.Address,
+		Handler: engine,
+	}
 
-	// 启动一个goroutine来读取用户输入
+	// 优雅关闭
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
 	go func() {
-		for {
-			command, err := reader.ReadString('\n')
-			if err != nil {
-				if err.Error() != "EOF" {
-					log.Printf("[WARN] 读取命令时发生错误: %v", err)
-				}
-				close(cmdChan)
-				return
-			}
-			cmdChan <- strings.TrimSpace(command)
+		log.Printf("HTTP服务器正在启动，监听地址: %s\n", cfg.Server.Address)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP服务器启动失败: %v\n", err)
 		}
 	}()
 
-	// 主循环处理命令
-	for command := range cmdChan {
-		if command == "" {
-			continue
-		}
+	<-quit
+	log.Println("正在关闭服务器...")
 
-		parts := strings.Fields(command)
-		if len(parts) == 0 {
-			continue
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-		switch parts[0] {
-		case "call":
-			if len(parts) != 3 {
-				log.Printf("[ERROR] 用法错误: call <from> <to>")
-				showHelp()
-				continue
-			}
-			from, to := parts[1], parts[2]
-			if err := client.HandleCall(from, to); err != nil {
-				log.Printf("[ERROR] 发起呼叫失败: %v", err)
-			}
-		case "quit", "exit":
-			log.Println("[INFO] 正在退出程序...")
-			return
-		case "help":
-			showHelp()
-		default:
-			log.Printf("[WARN] 未知命令: %s", parts[0])
-			showHelp()
-		}
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatalf("服务器关闭失败: %v\n", err)
 	}
-}
 
-// showHelp 显示帮助信息
-func showHelp() {
-	fmt.Println("\n可用命令:")
-	fmt.Println("  help            - 显示此帮助信息")
-	fmt.Println("  quit/exit       - 退出程序")
-	fmt.Print("> ")
-}
-
-// handleEvents 处理FreeSWITCH事件
-func handleEvents(ctx context.Context, fsClient *fs.Client) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event := <-fsClient.GetEvents():
-			log.Printf("[DEBUG] 处理事件: %s", event.EventName)
-
-			switch event.EventName {
-			case "CHANNEL_CREATE":
-				log.Printf("[INFO] 通道创建: 主叫=%s, 被叫=%s, UUID=%s",
-					event.CallerNumber, event.CalledNumber, event.CallID)
-
-			case "CHANNEL_ANSWER":
-				log.Printf("[INFO] 通话应答: 主叫=%s, 被叫=%s, UUID=%s",
-					event.CallerNumber, event.CalledNumber, event.CallID)
-
-			case "CHANNEL_HANGUP":
-				log.Printf("[INFO] 通话挂断: 主叫=%s, 被叫=%s, UUID=%s",
-					event.CallerNumber, event.CalledNumber, event.CallID)
-
-			case "CHANNEL_DESTROY":
-				log.Printf("[INFO] 通道销毁: 主叫=%s, 被叫=%s, UUID=%s", event.CallerNumber, event.CalledNumber, event.CallID)
-
-			}
-		}
-	}
+	log.Println("服务器已关闭")
 }

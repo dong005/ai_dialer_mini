@@ -1,103 +1,148 @@
+// Package config 提供配置加载和管理功能
 package config
 
 import (
 	"fmt"
-	"io/ioutil"
+	"os"
+	"path/filepath"
 
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
-// Config 应用配置结构
+// Config 应用程序配置结构
 type Config struct {
-	FreeSWITCH *FSConfig        `yaml:"freeswitch"` // FreeSWITCH配置
-	ASR        *ASRConfig       `yaml:"asr"`        // ASR配置
-	WebSocket  *WebSocketConfig `yaml:"websocket"`  // WebSocket配置
+	Server     ServerConfig     `yaml:"server"`
+	FreeSWITCH FreeSWITCHConfig `yaml:"freeswitch"`
+	ASR        ASRConfig        `yaml:"asr"`
+	MySQL      MySQLConfig      `yaml:"mysql"`
+	Redis      RedisConfig      `yaml:"redis"`
 }
 
-// FSConfig FreeSWITCH配置
-type FSConfig struct {
-	Host     string `yaml:"host"`     // 主机地址
-	Port     int    `yaml:"port"`     // 端口
-	Password string `yaml:"password"` // 密码
+// ServerConfig HTTP服务器配置
+type ServerConfig struct {
+	Address string `yaml:"address"` // 服务器监听地址，如 ":8080"
+}
+
+// FreeSWITCHConfig FreeSWITCH连接配置
+type FreeSWITCHConfig struct {
+	Host     string `yaml:"host"`     // FreeSWITCH主机地址
+	Port     int    `yaml:"port"`     // FreeSWITCH端口
+	Password string `yaml:"password"` // 认证密码
 }
 
 // ASRConfig 语音识别配置
 type ASRConfig struct {
+	Provider  string `yaml:"provider"`   // 提供商：xfyun, aliyun等
 	AppID     string `yaml:"app_id"`     // 应用ID
 	APIKey    string `yaml:"api_key"`    // API密钥
 	APISecret string `yaml:"api_secret"` // API密钥
-	HostURL   string `yaml:"host_url"`   // 服务地址
+	ServerURL string `yaml:"server_url"` // 服务器地址
 }
 
-// WebSocketConfig WebSocket配置
-type WebSocketConfig struct {
-	Host             string `yaml:"host"`              // 服务器主机
-	Port             int    `yaml:"port"`              // 服务器端口
-	Path             string `yaml:"path"`              // WebSocket路径
-	HandshakeTimeout int    `yaml:"handshake_timeout"` // 握手超时时间(秒)
-	WriteTimeout     int    `yaml:"write_timeout"`     // 写超时时间(秒)
-	ReadTimeout      int    `yaml:"read_timeout"`      // 读超时时间(秒)
-	PingInterval     int    `yaml:"ping_interval"`     // 心跳间隔(秒)
-	BufferSize       int    `yaml:"buffer_size"`       // 缓冲区大小
-	EnableTLS        bool   `yaml:"enable_tls"`        // 是否启用TLS
-	CertFile         string `yaml:"cert_file"`         // TLS证书文件
-	KeyFile          string `yaml:"key_file"`          // TLS密钥文件
+// MySQLConfig MySQL配置
+type MySQLConfig struct {
+	Host     string `yaml:"host"`     // MySQL主机地址
+	Port     int    `yaml:"port"`     // MySQL端口
+	User     string `yaml:"user"`     // MySQL用户名
+	Password string `yaml:"password"` // MySQL密码
+	Database string `yaml:"database"` // 数据库名
 }
 
-// Load 从YAML文件加载配置
-func Load(filename string) (*Config, error) {
-	var config Config
+// RedisConfig Redis配置
+type RedisConfig struct {
+	Host     string `yaml:"host"`     // Redis主机地址
+	Port     int    `yaml:"port"`     // Redis端口
+	Password string `yaml:"password"` // Redis密码
+	DB       int    `yaml:"db"`      // Redis数据库编号
+}
 
-	data, err := ioutil.ReadFile(filename)
+// Load 从配置文件加载配置
+func Load(configPath string) (*Config, error) {
+	// 获取配置文件的绝对路径
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("获取配置文件绝对路径失败: %v", err)
+	}
+
+	// 读取配置文件
+	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("读取配置文件失败: %v", err)
 	}
 
+	// 解析YAML
+	var config Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %v", err)
+	}
+
+	// 验证配置
+	if err := validateConfig(&config); err != nil {
+		return nil, fmt.Errorf("配置验证失败: %v", err)
 	}
 
 	return &config, nil
 }
 
-// NewConfig 创建新的配置实例
-func NewConfig() *Config {
-	return &Config{
-		FreeSWITCH: &FSConfig{
-			Host:     "localhost",
-			Port:     8021,
-			Password: "ClueCon",
-		},
-		ASR: &ASRConfig{
-			AppID:     "",
-			APIKey:    "",
-			APISecret: "",
-			HostURL:   "wss://iat-api.xfyun.cn/v2/iat",
-		},
-		WebSocket: &WebSocketConfig{
-			Host:             "localhost",
-			Port:             8080,
-			Path:             "/ws",
-			HandshakeTimeout: 10,
-			WriteTimeout:     10,
-			ReadTimeout:      10,
-			PingInterval:     30,
-			BufferSize:       4096,
-			EnableTLS:        false,
-		},
+// validateConfig 验证配置是否有效
+func validateConfig(config *Config) error {
+	// 验证服务器配置
+	if config.Server.Address == "" {
+		return fmt.Errorf("服务器地址不能为空")
 	}
-}
 
-// Validate 验证所有配置
-func (c *Config) Validate() error {
-	if c.FreeSWITCH == nil {
-		return fmt.Errorf("FreeSWITCH配置不能为空")
+	// 验证FreeSWITCH配置
+	if config.FreeSWITCH.Host == "" {
+		return fmt.Errorf("FreeSWITCH主机地址不能为空")
 	}
-	if c.ASR == nil {
-		return fmt.Errorf("ASR配置不能为空")
+	if config.FreeSWITCH.Port <= 0 {
+		return fmt.Errorf("FreeSWITCH端口必须大于0")
 	}
-	if c.WebSocket == nil {
-		return fmt.Errorf("WebSocket配置不能为空")
+	if config.FreeSWITCH.Password == "" {
+		return fmt.Errorf("FreeSWITCH密码不能为空")
 	}
+
+	// 验证ASR配置
+	if config.ASR.Provider == "" {
+		return fmt.Errorf("ASR提供商不能为空")
+	}
+	if config.ASR.AppID == "" {
+		return fmt.Errorf("ASR应用ID不能为空")
+	}
+	if config.ASR.APIKey == "" {
+		return fmt.Errorf("ASR API密钥不能为空")
+	}
+	if config.ASR.APISecret == "" {
+		return fmt.Errorf("ASR API密钥不能为空")
+	}
+	if config.ASR.ServerURL == "" {
+		return fmt.Errorf("ASR服务器地址不能为空")
+	}
+
+	// 验证MySQL配置
+	if config.MySQL.Host == "" {
+		return fmt.Errorf("MySQL主机地址不能为空")
+	}
+	if config.MySQL.Port <= 0 {
+		return fmt.Errorf("MySQL端口必须大于0")
+	}
+	if config.MySQL.User == "" {
+		return fmt.Errorf("MySQL用户名不能为空")
+	}
+	if config.MySQL.Database == "" {
+		return fmt.Errorf("MySQL数据库名不能为空")
+	}
+
+	// 验证Redis配置
+	if config.Redis.Host == "" {
+		return fmt.Errorf("Redis主机地址不能为空")
+	}
+	if config.Redis.Port <= 0 {
+		return fmt.Errorf("Redis端口必须大于0")
+	}
+	if config.Redis.DB < 0 {
+		return fmt.Errorf("Redis数据库编号不能为负数")
+	}
+
 	return nil
 }

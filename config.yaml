@@ -1,14 +1,39 @@
+# 服务器配置
+server:
+  address: ":8080"
+  mode: "debug"
+
 # FreeSWITCH配置
 freeswitch:
   host: "192.168.11.180"
   port: 8021
   password: "ClueCon"
 
-# 科大讯飞ASR配置
+# 语音识别配置
 asr:
-  appid: "c0de4f24"
-  apikey: "51012a35448538a8396dc564cf050f68"
-  apisecret: "NWRhZDBkNzA5ZDQxNGMzYmQ1NWMwMWNh"
+  provider: "xfyun"
+  app_id: "c0de4f24"
+  api_key: "51012a35448538a8396dc564cf050f68"
+  api_secret: "NWRhZDBkNzA5ZDQxNGMzYmQ1NWMwMWNh"
+  server_url: "wss://iat-api.xfyun.cn/v2/iat"
+  audio_type: "audio/L16;rate=8000"
+  sample_rate: 8000
+
+# 语音合成配置
+tts:
+  provider: "edge"
+  api_key: ""
+  api_region: "eastasia"
+  voice: "zh-CN-XiaoxiaoNeural"
+  rate: 0
+  pitch: 0
+
+# 大语言模型配置
+llm:
+  provider: "ollama"
+  model: "qwen"
+  server_url: "http://localhost:11434"
+  max_tokens: 2048
 
 # MySQL配置
 mysql:
