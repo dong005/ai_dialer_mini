@@ -34,7 +34,17 @@ func NewESLClient(config ESLConfig) *ESLClient {
 	return &ESLClient{
 		config:   config,
 		handlers: make(map[string]EventHandler),
+		running:  false,
 	}
+}
+
+// NewESLClientWithDefaultConfig 创建新的ESL客户端，使用默认配置
+func NewESLClientWithDefaultConfig() *ESLClient {
+	return NewESLClient(ESLConfig{
+		Host:     "127.0.0.1",
+		Port:     8021,
+		Password: "ClueCon",
+	})
 }
 
 // Connect 连接到FreeSWITCH
