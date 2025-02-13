@@ -14,5 +14,5 @@ func RegisterDialogRoutes(r *gin.Engine, asrConfig xfyun.Config, ollamaConfig ol
 	dialogHandler := handlers.NewDialogHandler(asrConfig, ollamaConfig)
 
 	// 注册WebSocket路由
-	r.GET("/dialog", dialogHandler.HandleWebSocket)
+	r.GET("/", dialogHandler.HandleWebSocket)
 }

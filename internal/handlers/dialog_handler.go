@@ -34,9 +34,21 @@ type DialogSession struct {
 
 // NewDialogHandler 创建对话处理器
 func NewDialogHandler(asrConfig xfyun.Config, ollamaConfig ollama.Config) *DialogHandler {
+	// 创建ASR客户端
+	asrClient := xfyun.NewASRClient(asrConfig, nil)
+	if asrClient == nil {
+		log.Println("警告: ASR客户端初始化失败")
+	}
+
+	// 创建Ollama客户端
+	ollamaClient := ollama.NewClient(ollamaConfig)
+	if ollamaClient == nil {
+		log.Println("警告: Ollama客户端初始化失败")
+	}
+
 	return &DialogHandler{
-		asrClient:    xfyun.NewASRClient(asrConfig, nil),
-		ollamaClient: ollama.NewClient(ollamaConfig),
+		asrClient:    asrClient,
+		ollamaClient: ollamaClient,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true

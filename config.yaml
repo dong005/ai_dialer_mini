@@ -15,7 +15,7 @@ xfyun:
 # Ollama配置
 ollama:
   host: "http://localhost:11434"
-  model: "qwen"
+  model: "qwen:0.5b"
 
 # WebSocket配置
 websocket:
