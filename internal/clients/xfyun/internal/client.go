@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/url"
 	"strings"
@@ -78,65 +79,39 @@ func (c *WSClient) Connect() error {
 	}
 
 	// 生成鉴权URL
-	authUrl, err := c.getAuthURL()
+	authURL, err := c.getAuthURL()
 	if err != nil {
 		return fmt.Errorf("生成鉴权URL失败: %v", err)
 	}
 
-	// 设置连接超时
+	// 创建WebSocket连接
 	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
+		HandshakeTimeout: 5 * time.Second,
 	}
 
-	// 添加重试逻辑
-	var lastError error
-	for i := 0; i <= c.config.MaxRetries; i++ {
-		if i > 0 {
-			time.Sleep(c.config.ReconnectInterval)
+	conn, resp, err := dialer.Dial(authURL, nil)
+	if err != nil {
+		if resp != nil {
+			body, _ := ioutil.ReadAll(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("连接失败: HTTP %d - %s - %v", resp.StatusCode, string(body), err)
 		}
-
-		conn, _, err := dialer.Dial(authUrl, nil)
-		if err == nil {
-			c.conn = conn
-			c.isRunning = true
-			c.retryCount = i
-
-			// 启动心跳检测
-			go func() {
-				ticker := time.NewTicker(5 * time.Second)
-				defer ticker.Stop()
-
-				for {
-					c.mu.RLock()
-					if !c.isRunning {
-						c.mu.RUnlock()
-						return
-					}
-					c.mu.RUnlock()
-
-					c.writeMu.Lock()
-					err := c.conn.WriteMessage(websocket.PingMessage, nil)
-					c.writeMu.Unlock()
-
-					if err != nil {
-						log.Printf("发送心跳失败: %v", err)
-						c.mu.Lock()
-						c.isRunning = false
-						c.mu.Unlock()
-						return
-					}
-
-					time.Sleep(5 * time.Second)
-				}
-			}()
-
-			go c.readLoop()
-			return nil
-		}
-		lastError = err
+		return fmt.Errorf("连接失败: %v", err)
+	}
+	if resp.StatusCode != 101 {
+		body, _ := ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
+		return fmt.Errorf("连接失败: HTTP %d - %s", resp.StatusCode, string(body))
 	}
 
-	return fmt.Errorf("WebSocket连接失败，已重试%d次: %v", c.config.MaxRetries, lastError)
+	c.conn = conn
+	c.isRunning = true
+	c.retryCount = 0
+
+	// 启动读取循环
+	go c.readLoop()
+
+	return nil
 }
 
 // Close 关闭连接
@@ -168,18 +143,40 @@ func (c *WSClient) SendAudio(data []byte, isEnd bool) error {
 	c.mu.RUnlock()
 
 	var frame map[string]interface{}
+
 	if isEnd {
 		// 结束帧
 		frame = map[string]interface{}{
 			"data": map[string]interface{}{
 				"status":   STATUS_LAST_FRAME,
 				"format":   fmt.Sprintf("audio/L16;rate=%d", c.config.SampleRate),
-				"audio":    "",
+				"audio":    base64.StdEncoding.EncodeToString(data),
 				"encoding": "raw",
 			},
 		}
+	} else if retryCount == 0 {
+		// 第一帧，包含完整配置
+		frame = map[string]interface{}{
+			"common": map[string]interface{}{
+				"app_id": c.config.AppID,
+			},
+			"business": map[string]interface{}{
+				"language": "zh_cn",
+				"domain":   "iat",
+				"accent":   "mandarin",
+				"dwa":     "wpgs", // 开启动态修正功能
+				"vad_eos": 3000,   // 后端点检测时间，单位是毫秒
+			},
+			"data": map[string]interface{}{
+				"status":   STATUS_FIRST_FRAME,
+				"format":   fmt.Sprintf("audio/L16;rate=%d", c.config.SampleRate),
+				"audio":    base64.StdEncoding.EncodeToString(data),
+				"encoding": "raw",
+			},
+		}
+		c.retryCount++
 	} else {
-		// 音频数据帧
+		// 中间帧
 		frame = map[string]interface{}{
 			"data": map[string]interface{}{
 				"status":   STATUS_CONTINUE_FRAME,
@@ -188,30 +185,10 @@ func (c *WSClient) SendAudio(data []byte, isEnd bool) error {
 				"encoding": "raw",
 			},
 		}
-		// 只在第一帧添加common和business字段
-		if retryCount == 0 {
-			frame["common"] = map[string]interface{}{
-				"app_id": c.config.AppID,
-			}
-			frame["business"] = map[string]interface{}{
-				"language": "zh_cn",
-				"domain":   "iat",
-				"accent":   "mandarin",
-				"dwa":     "wpgs",
-				"vad_eos": 3000,
-			}
-			// 修改为第一帧状态
-			frame["data"].(map[string]interface{})["status"] = STATUS_FIRST_FRAME
-		}
-	}
-
-	frameData, err := json.Marshal(frame)
-	if err != nil {
-		return fmt.Errorf("编码音频数据失败: %v", err)
 	}
 
 	c.writeMu.Lock()
-	err = c.conn.WriteMessage(websocket.TextMessage, frameData)
+	err := c.conn.WriteJSON(frame)
 	c.writeMu.Unlock()
 
 	if err != nil {
@@ -236,6 +213,22 @@ func (c *WSClient) readLoop() {
 		log.Println("readLoop退出")
 	}()
 
+	type RespData struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Sid     string `json:"sid"`
+		Data    struct {
+			Status int `json:"status"`
+			Result struct {
+				Ws []struct {
+					Cw []struct {
+						W string `json:"w"`
+					} `json:"cw"`
+				} `json:"ws"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+
 	for {
 		c.mu.RLock()
 		if !c.isRunning {
@@ -252,61 +245,45 @@ func (c *WSClient) readLoop() {
 			return
 		}
 
-		log.Printf("收到原始消息: %s", string(message))
-
-		var response map[string]interface{}
-		if err := json.Unmarshal(message, &response); err != nil {
+		var resp RespData
+		if err := json.Unmarshal(message, &resp); err != nil {
 			log.Printf("解析响应失败: %v", err)
 			continue
 		}
 
 		// 检查响应码
-		if code, ok := response["code"].(float64); ok && code != 0 {
-			msg, _ := response["message"].(string)
-			log.Printf("科大讯飞返回错误: %s", msg)
-			continue
+		if resp.Code != 0 {
+			log.Printf("科大讯飞返回错误: %s", resp.Message)
+			if c.callback != nil {
+				c.callback("", true)
+			}
+			return
 		}
 
 		// 处理响应
-		if data, ok := response["data"].(map[string]interface{}); ok {
-			if result, ok := data["result"].(map[string]interface{}); ok {
-				if ws, ok := result["ws"].([]interface{}); ok && len(ws) > 0 {
-					var recognizedText strings.Builder
-					for _, item := range ws {
-						if cw, ok := item.(map[string]interface{}); ok {
-							if words, ok := cw["cw"].([]interface{}); ok {
-								for _, word := range words {
-									if w, ok := word.(map[string]interface{}); ok {
-										if t, ok := w["w"].(string); ok {
-											recognizedText.WriteString(t)
-										}
-									}
-								}
-							}
-						}
-					}
-					text := recognizedText.String()
-					log.Printf("识别到文本: %s", text)
-
-					// 检查是否是最终结果
-					isEnd := false
-					if status, ok := data["status"].(float64); ok {
-						isEnd = status == 2
-					}
-
-					c.mu.Lock()
-					c.result = text
-					c.mu.Unlock()
-
-					if c.callback != nil {
-						if err := c.callback(text, isEnd); err != nil {
-							log.Printf("回调处理错误: %v", err)
-						}
-					} else {
-						log.Printf("回调函数未设置")
-					}
-				}
+		var text strings.Builder
+		for _, ws := range resp.Data.Result.Ws {
+			for _, cw := range ws.Cw {
+				text.WriteString(cw.W)
 			}
+		}
+		recognizedText := text.String()
+		if recognizedText != "" {
+			log.Printf("识别到文本: %s", recognizedText)
+		}
+
+		// 检查是否是最终结果
+		isEnd := resp.Data.Status == 2
+
+		if c.callback != nil {
+			if err := c.callback(recognizedText, isEnd); err != nil {
+				log.Printf("回调处理错误: %v", err)
+			}
+		}
+
+		// 如果是最终结果，关闭连接
+		if isEnd {
+			return
 		}
 	}
 }

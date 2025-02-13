@@ -2,7 +2,6 @@ package services
 
 import (
 	"log"
-	"time"
 
 	"ai_dialer_mini/internal/clients/xfyun"
 	"ai_dialer_mini/internal/config"
@@ -17,19 +16,8 @@ type ASRService struct {
 
 // NewASRService 创建新的ASR服务实例
 func NewASRService(cfg *config.Config, dialogSvc models.DialogService) *ASRService {
-	// 创建ASR客户端配置
-	asrConfig := xfyun.Config{
-		AppID:             cfg.ASR.AppID,
-		APIKey:            cfg.ASR.APIKey,
-		APISecret:         cfg.ASR.APISecret,
-		ServerURL:         cfg.ASR.ServerURL,
-		ReconnectInterval: time.Duration(cfg.ASR.ReconnectInterval) * time.Second,
-		MaxRetries:        cfg.ASR.MaxRetries,
-		SampleRate:        cfg.ASR.SampleRate,
-	}
-
 	// 创建ASR客户端
-	client := xfyun.NewASRClient(asrConfig, dialogSvc)
+	client := xfyun.NewASRClient(cfg.XFYun, dialogSvc)
 
 	return &ASRService{
 		client:    client,

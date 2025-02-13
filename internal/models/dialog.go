@@ -6,6 +6,13 @@ type Message struct {
 	Content string `json:"content"`  // 消息内容
 }
 
+// DialogResponse WebSocket响应消息
+type DialogResponse struct {
+	Type      string `json:"type"`       // 消息类型：text/error
+	Content   string `json:"content"`    // 消息内容
+	SessionID string `json:"session_id"` // 会话ID
+}
+
 // DialogService 对话服务接口
 type DialogService interface {
 	// ProcessMessage 处理用户消息并返回回复

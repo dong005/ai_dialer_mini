@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"ai_dialer_mini/internal/clients/freeswitch"
 	"ai_dialer_mini/internal/config"
 	"ai_dialer_mini/internal/handlers"
 	"ai_dialer_mini/internal/middleware"
+	"ai_dialer_mini/internal/routes"
 	"ai_dialer_mini/internal/services"
 	"ai_dialer_mini/internal/services/ws"
 
@@ -30,27 +30,6 @@ func main() {
 		log.Fatalf("加载配置文件失败: %v\n", err)
 	}
 
-	// 创建FreeSWITCH ESL客户端配置
-	fsConfig := freeswitch.ESLConfig{
-		Host:     cfg.FreeSWITCH.Host,
-		Port:     cfg.FreeSWITCH.Port,
-		Password: cfg.FreeSWITCH.Password,
-	}
-
-	// 创建FreeSWITCH ESL客户端
-	fsClient := freeswitch.NewESLClient(fsConfig)
-
-	// 连接到FreeSWITCH
-	if err := fsClient.Connect(); err != nil {
-		log.Fatalf("连接FreeSWITCH失败: %v\n", err)
-	}
-	defer fsClient.Close()
-
-	// 订阅事件
-	if err := fsClient.SubscribeEvents(); err != nil {
-		log.Fatalf("订阅事件失败: %v\n", err)
-	}
-
 	// 创建对话服务
 	dialogService := services.NewDialogService(cfg)
 
@@ -58,15 +37,19 @@ func main() {
 	wsService := ws.NewASRServer(cfg, dialogService)
 
 	// 创建Gin引擎
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
 	// 注册中间件
 	r.Use(middleware.Cors())
 	r.Use(middleware.Logger())
 
+	// 注册对话路由
+	routes.RegisterDialogRoutes(r, cfg.XFYun, cfg.Ollama)
+
 	// 注册路由处理器
 	handlers.RegisterHandlers(r, wsService)
-
+	
 	// 创建HTTP服务器
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),

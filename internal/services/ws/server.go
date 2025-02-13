@@ -54,16 +54,6 @@ func NewASRServer(cfg *config.Config, dialogSvc models.DialogService) *ASRServer
 		cfg = config.GetConfig()
 	}
 
-	asrConfig := xfyun.Config{
-		AppID:             cfg.ASR.AppID,
-		APIKey:            cfg.ASR.APIKey,
-		APISecret:         cfg.ASR.APISecret,
-		ServerURL:         cfg.ASR.ServerURL,
-		ReconnectInterval: time.Duration(cfg.ASR.ReconnectInterval) * time.Second,
-		MaxRetries:        cfg.ASR.MaxRetries,
-		SampleRate:        cfg.ASR.SampleRate,
-	}
-
 	server := &ASRServer{
 		Config: cfg,
 		Upgrader: websocket.Upgrader{
@@ -79,7 +69,7 @@ func NewASRServer(cfg *config.Config, dialogSvc models.DialogService) *ASRServer
 		},
 		Grammars:     make(map[*websocket.Conn]string),
 		LastActivity: make(map[*websocket.Conn]time.Time),
-		ASRClient:    xfyun.NewASRClient(asrConfig, dialogSvc),
+		ASRClient:    xfyun.NewASRClient(cfg.XFYun, dialogSvc),
 		DialogSvc:    dialogSvc,
 	}
 

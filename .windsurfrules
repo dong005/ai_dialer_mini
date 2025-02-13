@@ -1,11 +1,10 @@
-创建方法的时候先检测是否已经存在，除非必要尽量不要创建文件
-对接科大讯飞参考demo：\demo\iat_ws_go_demo\iat_ws_go_demo.go
-单项测试科大讯飞asr识别的时候用demo\iat_ws_go_demo\16k_10.pcm音频文件
-对接free switch参考python的demo:demo\test.py
-对接asr客户端参考客户端源码demo\mod_whisper
-
 此脚本针对客户语音交互系统开发，使用 Go Gin 框架处理后端逻辑，
 确保代码结构清晰、职责明确、可维护性强，遵循严格的开发规范和最佳实践。
+创建方法的时候先检测是否已经存在，除非必要尽量不要创建文件
+对接科大讯飞参考demo：\demo\iat_ws_go_demo\iat_ws_go_demo.go官方文档https://www.xfyun.cn/doc/asr/voicedictation/API.html
+单项测试科大讯飞asr识别的时候用demo\iat_ws_go_demo\16k_10.pcm音频文件，要和demo对比下处理的速度，效率要比它高
+对接free switch参考python的demo:demo\test.py
+对接asr客户端参考客户端源码demo\mod_whisper
 =========================================================
 -------------------- 项目分层规则 --------------------
 项目采用分层架构，清晰隔离不同功能代码，提高代码复用性和可维护性。
@@ -92,7 +91,7 @@ directory_pattern: "*/",
 responsibility: "存放可复用的通用模块，独立可在其他项目复用"
 }
 4. test/ 目录规则
-存放所有单元测试文件，按被测试的模块或文件结构进行组织，便于管理和维护。
+存放所有单元测试文件，按被测试的模块或文件结构进行组织，便于管理和维护。命名规则是测试项目名_测试方法名_test.go
 test/ {
 file_pattern: "/go",
 responsibility: "存放单元测试代码，对各模块进行功能正确性验证"
@@ -103,7 +102,7 @@ responsibility: "存放单元测试代码，对各模块进行功能正确性验
 config/ {
 responsibility: "加载和解析配置文件，支持动态更新，定义外部依赖配置"
 }
-2. HTTP 路由处理
+2. HTTP 控制器
 handlers/ {
 responsibility: "接收 HTTP 请求，调用服务层逻辑，按功能模块划分处理器文件，使用 Gin 路由注册机制"
 }

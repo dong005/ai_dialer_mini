@@ -3,43 +3,24 @@ server:
   host: "0.0.0.0"
   port: 8080
 
-# FreeSWITCH配置
-freeswitch:
-  host: "192.168.11.180"
-  port: 8021
-  password: "ClueCon"
-
 # 语音识别配置
-asr:
-  provider: "xfyun"
-  app_id: "XXXXX"
-  api_key: "XXXXX"
-  api_secret: "XXXXX"
+xfyun:
+  app_id: "c0de4f24"
+  api_key: "51012a35448538a8396dc564cf050f68"
+  api_secret: "NWRhZDBkNzA5ZDQxNGMzYmQ1NWMwMWNh"
   server_url: "wss://iat-api.xfyun.cn/v2/iat"
-  reconnect_interval: 5
   max_retries: 3
-  audio_type: "audio/L16;rate=16000"
-  sample_rate: 16000
-
-# 语音合成配置
-tts:
-  provider: "edge"
-  api_key: ""
-  api_region: "eastasia"
-  voice: "zh-CN-XiaoxiaoNeural"
-  rate: 0
-  pitch: 0
+  reconnect_interval: 1
 
 # Ollama配置
 ollama:
   host: "http://localhost:11434"
   model: "qwen"
-  max_tokens: 2048
 
 # WebSocket配置
 websocket:
-  read_buffer_size: 4096
-  write_buffer_size: 4096
+  read_buffer_size: 1024
+  write_buffer_size: 1024
   ping_period: "30s"
   pong_wait: "60s"
 
