@@ -2,17 +2,41 @@
 package middleware
 
 import (
+	"log"
+	"time"
+
 	"github.com/gin-gonic/gin"
 )
 
 // Logger 日志中间件
 func Logger() gin.HandlerFunc {
-	return gin.Logger()
+	return func(c *gin.Context) {
+		// 开始时间
+		start := time.Now()
+
+		// 处理请求
+		c.Next()
+
+		// 结束时间
+		end := time.Now()
+		latency := end.Sub(start)
+
+		// 请求方法、路径和延迟
+		log.Printf("[%s] %s %s %v", end.Format("2006-01-02 15:04:05"), c.Request.Method, c.Request.URL.Path, latency)
+	}
 }
 
 // Recovery 恢复中间件
 func Recovery() gin.HandlerFunc {
-	return gin.Recovery()
+	return func(c *gin.Context) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("发生panic: %v", err)
+				c.AbortWithStatus(500)
+			}
+		}()
+		c.Next()
+	}
 }
 
 // CORS CORS中间件

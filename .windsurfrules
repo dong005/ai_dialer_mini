@@ -1,3 +1,9 @@
+创建方法的时候先检测是否已经存在，除非必要尽量不要创建文件
+对接科大讯飞参考demo：\demo\iat_ws_go_demo\iat_ws_go_demo.go
+单项测试科大讯飞asr识别的时候用demo\iat_ws_go_demo\16k_10.pcm音频文件
+对接free switch参考python的demo:demo\test.py
+对接asr客户端参考客户端源码demo\mod_whisper
+
 此脚本针对客户语音交互系统开发，使用 Go Gin 框架处理后端逻辑，
 确保代码结构清晰、职责明确、可维护性强，遵循严格的开发规范和最佳实践。
 =========================================================

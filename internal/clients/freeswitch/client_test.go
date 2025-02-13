@@ -93,7 +93,7 @@ func TestClientConnect(t *testing.T) {
 	host, portStr, _ := net.SplitHostPort(addr)
 	port, _ := strconv.Atoi(portStr)
 
-	client := NewClient(Config{
+	client := NewESLClient(ESLConfig{
 		Host:     host,
 		Port:     port,
 		Password: "ClueCon",
@@ -112,7 +112,7 @@ func TestClientSendCommand(t *testing.T) {
 	host, portStr, _ := net.SplitHostPort(addr)
 	port, _ := strconv.Atoi(portStr)
 
-	client := NewClient(Config{
+	client := NewESLClient(ESLConfig{
 		Host:     host,
 		Port:     port,
 		Password: "ClueCon",
@@ -135,7 +135,7 @@ func TestClientEventHandler(t *testing.T) {
 	host, portStr, _ := net.SplitHostPort(addr)
 	port, _ := strconv.Atoi(portStr)
 
-	client := NewClient(Config{
+	client := NewESLClient(ESLConfig{
 		Host:     host,
 		Port:     port,
 		Password: "ClueCon",

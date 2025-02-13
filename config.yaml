@@ -1,7 +1,7 @@
 # 服务器配置
 server:
-  address: ":8080"
-  mode: "debug"
+  host: "0.0.0.0"
+  port: 8080
 
 # FreeSWITCH配置
 freeswitch:
@@ -12,12 +12,14 @@ freeswitch:
 # 语音识别配置
 asr:
   provider: "xfyun"
-  app_id: "c0de4f24"
-  api_key: "51012a35448538a8396dc564cf050f68"
-  api_secret: "NWRhZDBkNzA5ZDQxNGMzYmQ1NWMwMWNh"
+  app_id: "XXXXX"
+  api_key: "XXXXX"
+  api_secret: "XXXXX"
   server_url: "wss://iat-api.xfyun.cn/v2/iat"
-  audio_type: "audio/L16;rate=8000"
-  sample_rate: 8000
+  reconnect_interval: 5
+  max_retries: 3
+  audio_type: "audio/L16;rate=16000"
+  sample_rate: 16000
 
 # 语音合成配置
 tts:
@@ -28,24 +30,30 @@ tts:
   rate: 0
   pitch: 0
 
-# 大语言模型配置
-llm:
-  provider: "ollama"
+# Ollama配置
+ollama:
+  host: "http://localhost:11434"
   model: "qwen"
-  server_url: "http://localhost:11434"
   max_tokens: 2048
+
+# WebSocket配置
+websocket:
+  read_buffer_size: 4096
+  write_buffer_size: 4096
+  ping_period: "30s"
+  pong_wait: "60s"
 
 # MySQL配置
 mysql:
-  host: "127.0.0.1"
+  host: "localhost"
   port: 3306
   user: "root"
-  password: ""
+  password: "123456"
   database: "ai_dialer"
 
 # Redis配置
 redis:
-  host: "127.0.0.1"
+  host: "localhost"
   port: 6379
   password: ""
   db: 0

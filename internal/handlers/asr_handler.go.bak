@@ -1,0 +1,328 @@
+package handlers
+
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"log"
+	"math"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"ai_dialer_mini/internal/clients/asr"
+	"ai_dialer_mini/internal/config"
+
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	"github.com/gorilla/websocket/ws"
+)
+
+const (
+	// 音频相关常量
+	AUDIO_BLOCK_SIZE  = 3200 // 与mod_whisper保持一致
+	ENERGY_THRESHOLD  = 30   // 能量阈值
+	MAX_SILENT_FRAMES = 20   // 最大静音帧数（约2.5秒）
+
+	// 音频帧状态
+	STATUS_FIRST_FRAME    = 0 // 第一帧
+	STATUS_CONTINUE_FRAME = 1 // 中间帧
+	STATUS_LAST_FRAME     = 2 // 最后一帧
+)
+
+var upgrader = websocket.Upgrader{
+	// 允许所有来源的连接，不检查Origin
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+	// 支持WSBRIDGE协议
+	Subprotocols: []string{"WSBRIDGE"},
+	// 设置握手超时
+	HandshakeTimeout: 10 * time.Second,
+}
+
+// ASRSession 表示一个语音识别会话
+type ASRSession struct {
+	Status       int           // 当前帧状态
+	SilentFrames int           // 连续静音帧计数
+	Buffer       *bytes.Buffer // 音频缓冲
+	LastEnergy   float64       // 上一帧的能量值
+	Client       *asr.XunfeiClient
+	StartTime    time.Time // 会话开始时间
+	LastActive   time.Time // 最后活动时间
+	TotalFrames  int       // 总帧数
+	TotalBytes   int64     // 总字节数
+}
+
+// ASRHandler 处理ASR相关的请求
+type ASRHandler struct {
+	sessions   map[*websocket.Conn]*ASRSession
+	sessionMux sync.Mutex
+	asrServer  *ws.ASRServer
+}
+
+// NewASRHandler 创建新的ASR处理器
+func NewASRHandler(asrServer *ws.ASRServer) *ASRHandler {
+	return &ASRHandler{
+		sessions: make(map[*websocket.Conn]*ASRSession),
+		asrServer: asrServer,
+	}
+}
+
+// detectEnergy 计算音频数据的能量值
+func detectEnergy(data []byte) float64 {
+	if len(data) < 2 {
+		return 0
+	}
+
+	var sum float64
+	samples := make([]int16, len(data)/2)
+
+	// 将字节数据转换为16位整数
+	for i := 0; i < len(data)-1; i += 2 {
+		sample := int16(binary.LittleEndian.Uint16(data[i:]))
+		samples[i/2] = sample
+		sum += float64(sample * sample)
+	}
+
+	// 计算均方根（RMS）能量
+	rms := math.Sqrt(sum / float64(len(samples)))
+	return rms
+}
+
+// createXunfeiClient 创建讯飞 ASR 客户端
+func (h *ASRHandler) createXunfeiClient(conn *websocket.Conn) *asr.XunfeiClient {
+	cfg := config.GetConfig()
+	// 创建ASR客户端
+	xfClient := asr.NewXunfeiClient(asr.Config{
+		AppID:     cfg.ASR.AppID,
+		APIKey:    cfg.ASR.APIKey,
+		APISecret: cfg.ASR.APISecret,
+		HostURL:   cfg.ASR.ServerURL,
+	})
+
+	// 设置识别结果回调
+	xfClient.SetResultCallback(func(text string, isLast bool) error {
+		if err := conn.WriteJSON(gin.H{
+			"type": "recognition",
+			"data": gin.H{
+				"text":   text,
+				"isLast": isLast,
+			},
+		}); err != nil {
+			log.Printf("发送识别结果失败: %v, 客户端: %s", err, conn.RemoteAddr().String())
+			return err
+		}
+		return nil
+	})
+
+	// 连接ASR服务
+	if err := xfClient.Connect(); err != nil {
+		log.Printf("连接讯飞ASR服务失败: %v, 客户端: %s", err, conn.RemoteAddr().String())
+		return nil
+	}
+
+	return xfClient
+}
+
+// HandleWebSocket 处理 WebSocket 连接
+func (h *ASRHandler) HandleWebSocket(c *gin.Context) {
+	log.Printf("收到来自 %s 的WebSocket连接请求", c.Request.RemoteAddr)
+
+	// 升级 HTTP 连接为 WebSocket
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Printf("升级 WebSocket 连接失败: %v, 客户端: %s", err, c.Request.RemoteAddr)
+		return
+	}
+	log.Printf("WebSocket连接已建立: %s", conn.RemoteAddr().String())
+
+	// 获取请求信息
+	path := c.Request.URL.Path
+	if path == "" {
+		path = c.Request.RequestURI
+	}
+	path = strings.TrimPrefix(path, "/")
+	
+	log.Printf("收到WebSocket请求 - 路径: %s, URI: %s, 方法: %s", path, c.Request.RequestURI, c.Request.Method)
+	log.Printf("请求头: %+v", c.Request.Header)
+
+	// 检查是否是WebSocket升级请求
+	if !strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
+		log.Printf("不是WebSocket请求: %s", path)
+		c.String(http.StatusBadRequest, "不是WebSocket请求")
+		return
+	}
+
+	// 检查是否是ASR请求
+	if path == "asr" || path == "" {
+		h.asrServer.ServeHTTP(c.Writer, c.Request)
+		return
+	}
+
+	// 创建新的会话
+	session := &ASRSession{
+		Status:     STATUS_FIRST_FRAME,
+		Buffer:     bytes.NewBuffer(make([]byte, 0, AUDIO_BLOCK_SIZE)),
+		StartTime:  time.Now(),
+		LastActive: time.Now(),
+	}
+
+	// 初始化讯飞 ASR 客户端
+	xfClient := h.createXunfeiClient(conn)
+	if xfClient == nil {
+		log.Printf("创建讯飞ASR客户端失败，关闭连接: %s", conn.RemoteAddr().String())
+		conn.Close()
+		return
+	}
+	session.Client = xfClient
+	log.Printf("讯飞ASR客户端已创建: %s", conn.RemoteAddr().String())
+
+	// 注册会话
+	h.sessionMux.Lock()
+	h.sessions[conn] = session
+	sessionCount := len(h.sessions)
+	h.sessionMux.Unlock()
+	log.Printf("会话已注册，当前连接数: %d, 客户端: %s", sessionCount, conn.RemoteAddr().String())
+
+	// 设置关闭处理器
+	conn.SetCloseHandler(func(code int, text string) error {
+		log.Printf("客户端请求关闭连接: %s, 代码: %d, 原因: %s", conn.RemoteAddr().String(), code, text)
+		h.sessionMux.Lock()
+		if session, ok := h.sessions[conn]; ok {
+			// 记录会话统计信息
+			duration := time.Since(session.StartTime)
+			log.Printf("会话统计 - 持续时间: %v, 总帧数: %d, 总字节数: %d",
+				duration, session.TotalFrames, session.TotalBytes)
+			// 关闭ASR客户端
+			if session.Client != nil {
+				session.Client.Close()
+			}
+		}
+		delete(h.sessions, conn)
+		sessionCount := len(h.sessions)
+		h.sessionMux.Unlock()
+		log.Printf("会话已注销，当前连接数: %d", sessionCount)
+		return nil
+	})
+
+	// 清理资源
+	defer func() {
+		h.sessionMux.Lock()
+		if session, ok := h.sessions[conn]; ok {
+			if session.Client != nil {
+				session.Client.Close()
+			}
+		}
+		delete(h.sessions, conn)
+		sessionCount := len(h.sessions)
+		h.sessionMux.Unlock()
+		conn.Close()
+		log.Printf("连接已关闭，当前连接数: %d, 客户端: %s", sessionCount, conn.RemoteAddr().String())
+	}()
+
+	// 发送欢迎消息
+	if err := conn.WriteJSON(gin.H{
+		"type": "welcome",
+		"data": gin.H{
+			"message": "ASR服务已连接",
+			"time":    time.Now().Format(time.RFC3339),
+		},
+	}); err != nil {
+		log.Printf("发送欢迎消息失败: %v, 客户端: %s", err, conn.RemoteAddr().String())
+		return
+	}
+	log.Printf("已发送欢迎消息: %s", conn.RemoteAddr().String())
+
+	// 处理音频数据
+	for {
+		messageType, data, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				log.Printf("客户端正常关闭连接: %s", conn.RemoteAddr().String())
+			} else {
+				log.Printf("读取消息错误: %v, 客户端: %s", err, conn.RemoteAddr().String())
+			}
+			return
+		}
+
+		if messageType == websocket.BinaryMessage {
+			if err := h.handleAudioData(conn, data); err != nil {
+				log.Printf("处理音频数据错误: %v, 客户端: %s", err, conn.RemoteAddr().String())
+				// 发送错误消息给客户端
+				if sendErr := conn.WriteJSON(gin.H{
+					"type": "error",
+					"data": gin.H{
+						"message": err.Error(),
+						"time":    time.Now().Format(time.RFC3339),
+					},
+				}); sendErr != nil {
+					log.Printf("发送错误消息失败: %v, 客户端: %s", sendErr, conn.RemoteAddr().String())
+				}
+				continue
+			}
+		}
+	}
+}
+
+// handleAudioData 处理音频数据
+func (h *ASRHandler) handleAudioData(conn *websocket.Conn, data []byte) error {
+	h.sessionMux.Lock()
+	session, ok := h.sessions[conn]
+	h.sessionMux.Unlock()
+
+	if !ok {
+		return fmt.Errorf("会话不存在")
+	}
+
+	// 更新会话状态
+	session.LastActive = time.Now()
+	session.TotalFrames++
+	session.TotalBytes += int64(len(data))
+
+	// 计算音频能量
+	energy := detectEnergy(data)
+
+	// 处理静音检测
+	if energy < ENERGY_THRESHOLD {
+		session.SilentFrames++
+		if session.SilentFrames >= MAX_SILENT_FRAMES {
+			// 发送最后一帧
+			session.Status = STATUS_LAST_FRAME
+			if err := session.Client.SendAudioFrame(data, session.Status); err != nil {
+				return fmt.Errorf("发送最后一帧失败: %v", err)
+			}
+			log.Printf("检测到静音结束，客户端: %s, 能量值: %.2f, 静音帧数: %d",
+				conn.RemoteAddr().String(), energy, session.SilentFrames)
+			// 重置状态
+			session.Status = STATUS_FIRST_FRAME
+			session.SilentFrames = 0
+			return nil
+		}
+	} else {
+		if session.SilentFrames > 0 {
+			log.Printf("检测到语音开始，客户端: %s, 能量值: %.2f",
+				conn.RemoteAddr().String(), energy)
+		}
+		session.SilentFrames = 0
+	}
+
+	// 发送音频数据
+	if err := session.Client.SendAudioFrame(data, session.Status); err != nil {
+		return fmt.Errorf("发送音频帧失败: %v", err)
+	}
+
+	// 更新帧状态
+	if session.Status == STATUS_FIRST_FRAME {
+		session.Status = STATUS_CONTINUE_FRAME
+		log.Printf("切换到连续帧状态，客户端: %s", conn.RemoteAddr().String())
+	}
+
+	return nil
+}
+
+// RegisterRoutes 注册路由
+func (h *ASRHandler) RegisterRoutes(r *gin.Engine) {
+	r.GET("/ws/asr", h.HandleWebSocket)
+}

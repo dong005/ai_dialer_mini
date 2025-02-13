@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"sync"
 
-	"ai_dialer_mini/internal/clients/asr"
+	"ai_dialer_mini/internal/models"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -19,14 +19,16 @@ var upgrader = websocket.Upgrader{
 
 // ASRHandler WebSocket ASR 处理器
 type ASRHandler struct {
-	clients    map[*websocket.Conn]*asr.XunfeiClient
+	wsService  models.WSService
+	clients    map[*websocket.Conn]string // WebSocket连接到会话ID的映射
 	clientsMux sync.Mutex
 }
 
 // NewASRHandler 创建新的 ASR 处理器实例
-func NewASRHandler() *ASRHandler {
+func NewASRHandler(wsService models.WSService) *ASRHandler {
 	return &ASRHandler{
-		clients: make(map[*websocket.Conn]*asr.XunfeiClient),
+		wsService: wsService,
+		clients:   make(map[*websocket.Conn]string),
 	}
 }
 
@@ -39,32 +41,28 @@ func (h *ASRHandler) HandleWebSocket(c *gin.Context) {
 		return
 	}
 
-	// 初始化讯飞 ASR 客户端
-	xfClient := h.createXunfeiClient(conn)
-	if xfClient == nil {
-		conn.Close()
-		return
+	// 生成会话ID
+	sessionID := c.Query("session_id")
+	if sessionID == "" {
+		sessionID = "default" // 如果没有提供会话ID，使用默认值
 	}
 
 	// 注册客户端
 	h.clientsMux.Lock()
-	h.clients[conn] = xfClient
+	h.clients[conn] = sessionID
 	h.clientsMux.Unlock()
 
 	// 处理连接关闭
 	defer func() {
 		h.clientsMux.Lock()
-		if client, ok := h.clients[conn]; ok {
-			client.Close()
-			delete(h.clients, conn)
-		}
+		delete(h.clients, conn)
 		h.clientsMux.Unlock()
 		conn.Close()
 	}()
 
 	// 处理 WebSocket 消息
 	for {
-		_, message, err := conn.ReadMessage()
+		messageType, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("读取 WebSocket 消息错误: %v", err)
@@ -73,56 +71,46 @@ func (h *ASRHandler) HandleWebSocket(c *gin.Context) {
 		}
 
 		// 处理消息
-		if err := h.handleMessage(conn, message); err != nil {
+		if err := h.handleMessage(conn, messageType, message); err != nil {
 			log.Printf("处理消息失败: %v", err)
 		}
 	}
 }
 
-// createXunfeiClient 创建讯飞 ASR 客户端
-func (h *ASRHandler) createXunfeiClient(conn *websocket.Conn) *asr.XunfeiClient {
-	config := asr.Config{
-		AppID:     "c0de4f24",
-		APIKey:    "51012a35448538a8396dc564cf050f68",
-		APISecret: "NWRhZDBkNzA5ZDQxNGMzYmQ1NWMwMWNh",
-		HostURL:   "wss://iat-api.xfyun.cn/v2/iat",
-	}
+// handleMessage 处理 WebSocket 消息
+func (h *ASRHandler) handleMessage(conn *websocket.Conn, messageType int, message []byte) error {
+	h.clientsMux.Lock()
+	sessionID := h.clients[conn]
+	h.clientsMux.Unlock()
 
-	client := asr.NewXunfeiClient(config)
+	switch messageType {
+	case websocket.BinaryMessage:
+		// 处理音频数据
+		result, err := h.wsService.ProcessAudio(sessionID, message)
+		if err != nil {
+			return err
+		}
 
-	// 设置识别结果回调
-	client.SetResultCallback(func(text string, isLast bool) error {
+		// 发送识别结果
 		response := map[string]interface{}{
 			"type": "result",
-			"text": text,
+			"text": result,
 		}
 		return conn.WriteJSON(response)
-	})
 
-	// 连接讯飞 ASR 服务
-	if err := client.Connect(); err != nil {
-		log.Printf("连接讯飞 ASR 服务失败: %v", err)
-		return nil
+	case websocket.TextMessage:
+		// 处理文本命令，如清除历史记录等
+		response := map[string]interface{}{
+			"type":   "error",
+			"error": "暂不支持文本命令",
+		}
+		return conn.WriteJSON(response)
 	}
 
-	return client
-}
-
-// handleMessage 处理 WebSocket 消息
-func (h *ASRHandler) handleMessage(conn *websocket.Conn, message []byte) error {
-	// 获取客户端
-	h.clientsMux.Lock()
-	client, ok := h.clients[conn]
-	h.clientsMux.Unlock()
-	if !ok {
-		return nil
-	}
-
-	// 发送音频帧给 ASR 客户端
-	return client.SendAudioFrame(message)
+	return nil
 }
 
 // RegisterRoutes 注册路由
 func (h *ASRHandler) RegisterRoutes(r *gin.Engine) {
-	r.GET("/asr", h.HandleWebSocket)
+	r.GET("/ws/asr", h.HandleWebSocket)
 }
